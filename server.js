@@ -164,13 +164,29 @@ app.post('/api/login', async (req, res) => {
     }
 });
 
-// --- NEW: GET /api/users - Get All Users (Admin Only) ---
+// --- MODIFIED: GET /api/users - Get All Users (Admin Only) with Task Count ---
 app.get('/api/users', authenticateToken, authorizeRoles(['admin']), async (req, res) => {
     try {
-        const [users] = await pool.query('SELECT id, username, role, created_at FROM users ORDER BY created_at DESC');
+        // New query to LEFT JOIN with tasks and COUNT them
+        const [users] = await pool.query(`
+            SELECT
+                u.id,
+                u.username,
+                u.role,
+                u.created_at,
+                COUNT(t.id) AS task_count -- <--- NEW: Count tasks
+            FROM
+                users u
+            LEFT JOIN -- <--- NEW: LEFT JOIN with tasks
+                tasks t ON u.id = t.user_id
+            GROUP BY -- <--- NEW: Group by user fields
+                u.id, u.username, u.role, u.created_at
+            ORDER BY
+                u.created_at DESC
+        `);
         res.json(users);
     } catch (err) {
-        console.error('Error fetching users:', err);
+        console.error('Error fetching users with task count:', err); // Updated log message
         res.status(500).json({ message: 'Error fetching users', error: err.message });
     }
 });
