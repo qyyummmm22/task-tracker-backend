@@ -165,34 +165,56 @@ app.post('/api/login', async (req, res) => {
 });
 
 // --- MODIFIED: GET /api/users - Get All Users (Admin Only) with Task Count ---
+// --- NEW: GET /api/users - Get All Users (Admin Only) with Task Count ---
 app.get('/api/users', authenticateToken, authorizeRoles(['admin']), async (req, res) => {
     try {
-        // New query to LEFT JOIN with tasks and COUNT them
         const [users] = await pool.query(`
             SELECT
                 u.id,
                 u.username,
                 u.role,
                 u.created_at,
-                COUNT(t.id) AS task_count -- <--- NEW: Count tasks
+                COUNT(t.id) AS task_count
             FROM
                 users u
-            LEFT JOIN -- <--- NEW: LEFT JOIN with tasks
+            LEFT JOIN
                 tasks t ON u.id = t.user_id
-            GROUP BY -- <--- NEW: Group by user fields
+            GROUP BY
                 u.id, u.username, u.role, u.created_at
             ORDER BY
                 u.created_at DESC
         `);
         res.json(users);
     } catch (err) {
-        console.error('Error fetching users with task count:', err); // Updated log message
+        console.error('Error fetching users with task count:', err);
         res.status(500).json({ message: 'Error fetching users', error: err.message });
     }
 });
 
+// --- NEW: DELETE /api/users/:id - Delete a User (Admin Only) ---
+app.delete('/api/users/:id', authenticateToken, authorizeRoles(['admin']), async (req, res) => {
+    const { id } = req.params; // ID of the user to be deleted
 
-// ... (Authentication & Authorization Middleware - remains the same) ...
+    // IMPORTANT: Prevent admin from deleting themselves if this is the only admin account.
+    // You might want to add more robust checks here (e.g., must be at least one admin left).
+    if (parseInt(id) === req.user.id) { // Check if admin is trying to delete their own account
+        // You might want to make this check more robust, e.g., only if they are the last admin
+        return res.status(403).json({ message: 'Forbidden: You cannot delete your own account here.' });
+    }
+
+    try {
+        const [result] = await pool.query('DELETE FROM users WHERE id = ?', [id]);
+
+        if (result.affectedRows === 0) {
+            return res.status(404).json({ message: 'User not found.' });
+        }
+        console.log(`User ID ${id} deleted successfully by Admin ${req.user.username}`);
+        res.status(204).send(); // No Content for successful deletion
+    } catch (err) {
+        console.error('Error deleting user:', err);
+        res.status(500).json({ message: 'Error deleting user', error: err.message });
+    }
+});
 
 // --- MODIFIED: Task API Endpoints (NOW WITH OWNERSHIP) ---
 // ... (app.get('/api/tasks'), app.post('/api/tasks'), app.put('/api/tasks/:id'), app.delete('/api/tasks/:id')) ...
