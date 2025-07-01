@@ -164,6 +164,18 @@ app.post('/api/login', async (req, res) => {
     }
 });
 
+// --- NEW: GET /api/users - Get All Users (Admin Only) ---
+app.get('/api/users', authenticateToken, authorizeRoles(['admin']), async (req, res) => {
+    try {
+        const [users] = await pool.query('SELECT id, username, role, created_at FROM users ORDER BY created_at DESC');
+        res.json(users);
+    } catch (err) {
+        console.error('Error fetching users:', err);
+        res.status(500).json({ message: 'Error fetching users', error: err.message });
+    }
+});
+
+
 // ... (Authentication & Authorization Middleware - remains the same) ...
 
 // --- MODIFIED: Task API Endpoints (NOW WITH OWNERSHIP) ---
@@ -179,32 +191,46 @@ app.listen(port, () => {
 // GET tasks for the logged-in user
 // GET tasks - Admin sees all, Staff sees their own
 // GET tasks - Admin sees all (or specific user's), Staff sees their own
+// GET tasks - Admin sees all (with owner/adder names), Staff sees their own (with adder name)
 app.get('/api/tasks', authenticateToken, async (req, res) => {
     try {
-        let query = 'SELECT t.*, u.username AS owner_username, u.role AS owner_role FROM tasks t JOIN users u ON t.user_id = u.id'; // Default join for task owner info
+        let query;
         let queryParams = [];
+
+        // Base query with two joins: one for owner, one for adder
+        query = `
+            SELECT
+                t.*,
+                u.username AS owner_username,
+                u.role AS owner_role,
+                adder.username AS added_by_username
+            FROM
+                tasks t
+            JOIN
+                users u ON t.user_id = u.id
+            LEFT JOIN  -- Use LEFT JOIN because added_by_user_id can be NULL
+                users adder ON t.added_by_user_id = adder.id
+        `; // <--- MODIFIED SQL (added LEFT JOIN)
 
         // Check if the authenticated user is an admin
         if (req.user.role === 'admin') {
-            const { userId } = req.query; // <--- NEW: Check for userId query parameter
+            const { userId } = req.query;
 
             if (userId) {
-                // Admin wants tasks for a specific user
-                query += ' WHERE t.user_id = ?'; // <--- Filter by specific user_id
+                query += ' WHERE t.user_id = ?';
                 queryParams.push(userId);
-                console.log(`Admin (${req.user.username}) fetching tasks for user ID: ${userId}`);
+                console.log(`Admin (${req.user.username}) fetching tasks for user ID: ${userId} with owner/adder names.`);
             } else {
-                // Admin wants ALL tasks (default admin view if no userId param)
-                console.log(`Admin (${req.user.username}) fetching all tasks.`);
+                console.log(`Admin (${req.user.username}) fetching all tasks with owner/adder names.`);
             }
         } else {
             // Staff/regular users: only see their own tasks
-            query += ' WHERE t.user_id = ?'; // <--- Filter by authenticated user's ID
+            query += ' WHERE t.user_id = ?';
             queryParams.push(req.user.id);
-            console.log(`Staff user (${req.user.username}) fetching their own tasks.`);
+            console.log(`Staff user (${req.user.username}) fetching their own tasks with adder name.`);
         }
 
-        query += ' ORDER BY t.created_at DESC'; // Always order by creation date
+        query += ' ORDER BY t.created_at DESC';
 
         const [rows] = await pool.query(query, queryParams);
         res.json(rows);
@@ -216,33 +242,31 @@ app.get('/api/tasks', authenticateToken, async (req, res) => {
 
 // POST a new task for the logged-in user
 // POST a new task (staff/admin can create for themselves, admin can assign to others)
+// POST a new task (staff/admin can create for themselves, admin can assign to others)
 app.post('/api/tasks', authenticateToken, authorizeRoles(['admin', 'staff']), async (req, res) => {
-    const { title, description, user_id: assignedUserId } = req.body; // <--- MODIFIED: Extract assignedUserId from body
-    const loggedInUserId = req.user.id; // Get ID of the user currently logged in
-    const loggedInUserRole = req.user.role; // Get role of the user currently logged in
+    const { title, description, user_id: assignedUserId } = req.body;
+    const loggedInUserId = req.user.id;
+    const loggedInUserRole = req.user.role;
+    const loggedInUsername = req.user.username; // <--- NEW: Get logged-in username
 
     if (!title) {
         return res.status(400).json({ message: 'Title is required' });
     }
 
-    let taskOwnerId = loggedInUserId; // Default owner is the logged-in user
+    let taskOwnerId = loggedInUserId;
+    let taskAddedById = loggedInUserId;
 
-    // If an admin is logged in AND they provided a user_id in the body,
-    // then assign the task to that user_id.
-    if (loggedInUserRole === 'admin' && assignedUserId) {
-        // Optional: You might want to validate if assignedUserId actually exists in your users table
-        // For now, we'll trust the ID passed by admin
+    if (loggedInUserRole === 'admin' && assignedUserId && assignedUserId !== loggedInUserId) {
         taskOwnerId = assignedUserId;
-        console.log(`Admin (${req.user.username}) adding task for user ID: ${taskOwnerId}`);
+        console.log(`Admin (${loggedInUsername}) adding task for user ID: ${taskOwnerId}, added by admin.`);
     } else {
-        console.log(`User (${req.user.username}) adding task for themselves.`);
+        console.log(`User (${loggedInUsername}) adding task for themselves.`);
     }
 
     try {
-        // Insert task with the determined taskOwnerId
         const [result] = await pool.query(
-            'INSERT INTO tasks (title, description, user_id) VALUES (?, ?, ?)',
-            [title, description, taskOwnerId] // <--- MODIFIED to use taskOwnerId
+            'INSERT INTO tasks (title, description, user_id, added_by_user_id) VALUES (?, ?, ?, ?)',
+            [title, description, taskOwnerId, taskAddedById]
         );
         res.status(201).json({
             id: result.insertId,
@@ -250,7 +274,9 @@ app.post('/api/tasks', authenticateToken, authorizeRoles(['admin', 'staff']), as
             description,
             completed: false,
             created_at: new Date().toISOString(),
-            user_id: taskOwnerId // <--- Include the correct owner ID in response
+            user_id: taskOwnerId,
+            added_by_user_id: taskAddedById,
+            added_by_username: loggedInUsername // <--- MODIFIED: Include logged-in username in response
         });
     } catch (err) {
         console.error('Error adding task:', err);
@@ -308,23 +334,54 @@ app.put('/api/tasks/:id', authenticateToken, authorizeRoles(['admin', 'staff']),
     }
 });
 
-// DELETE a task (only for admin users, and ensure ownership)
-app.delete('/api/tasks/:id', authenticateToken, authorizeRoles(['admin']), async (req, res) => {
+// --- MODIFIED: DELETE a task (Allow staff to delete their own, admin their own) ---
+// server.js
+// ... (Your imports and other setup code) ...
+
+// --- MODIFIED: DELETE a task (Allow staff to delete their own, admin their own, with detailed logs) ---
+app.delete('/api/tasks/:id', authenticateToken, authorizeRoles(['admin', 'staff']), async (req, res) => {
     const { id } = req.params;
-    const userId = req.user.id; // <--- NEW: Get user ID from authenticated token
+    const userId = req.user.id; // The ID of the currently logged-in user
+    const userRole = req.user.role; // <--- NEW: Get the role of the logged-in user
+
+    console.log(`DELETE attempt for Task ID: ${id} by User ID: ${userId} (Role: ${userRole})`);
+
+    let query;
+    let queryParams;
+
+    // --- MODIFIED LOGIC HERE ---
+    if (userRole === 'admin') {
+        // Admin can delete any task by its ID
+        query = 'DELETE FROM tasks WHERE id = ?';
+        queryParams = [id];
+        console.log('Admin user deleting any task.');
+    } else {
+        // Staff users can only delete tasks they own
+        query = 'DELETE FROM tasks WHERE id = ? AND user_id = ?';
+        queryParams = [id, userId];
+        console.log('Staff user deleting their own task.');
+    }
+    // --- END MODIFIED LOGIC ---
 
     try {
-        // Delete task where ID matches AND user_id matches
-        const [result] = await pool.query('DELETE FROM tasks WHERE id = ? AND user_id = ?', [id, userId]); // <--- MODIFIED
+        const [result] = await pool.query(query, queryParams); // <--- MODIFIED to use dynamic query and params
+
+        console.log('SQL Query Result for DELETE:', result);
+        console.log('Affected rows:', result.affectedRows);
 
         if (result.affectedRows === 0) {
+            // Determine if 404 (not found at all) or 403 (not owned)
             const [taskCheck] = await pool.query('SELECT id FROM tasks WHERE id = ?', [id]);
             if (taskCheck.length === 0) {
+                console.log(`Task ID ${id} truly not found.`);
                 return res.status(404).json({ message: 'Task not found.' });
             } else {
-                return res.status(403).json({ message: 'Access denied: You do not own this task.' });
+                // This 'else' path implies it was found but not owned (only applies to staff or if admin tried to delete non-existent task by owner)
+                console.log(`Task ID ${id} found, but not owned by user ${userId} or admin attempted to delete non-existent task by ID only.`);
+                return res.status(403).json({ message: 'Access denied: You do not own this task, or Admin tried to delete an non-existent ID.' });
             }
         }
+        console.log(`Task ID ${id} deleted successfully by user ${userId}.`);
         res.status(204).send();
     } catch (err) {
         console.error('Error deleting task:', err);
@@ -337,13 +394,3 @@ app.listen(port, () => {
     console.log(`Backend server listening at http://localhost:${port}`);
 });
 
-// --- NEW: GET /api/users - Get All Users (Admin Only) ---
-app.get('/api/users', authenticateToken, authorizeRoles(['admin']), async (req, res) => {
-    try {
-        const [users] = await pool.query('SELECT id, username, role, created_at FROM users ORDER BY created_at DESC');
-        res.json(users);
-    } catch (err) {
-        console.error('Error fetching users:', err);
-        res.status(500).json({ message: 'Error fetching users', error: err.message });
-    }
-});
