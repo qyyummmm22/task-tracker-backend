@@ -6,6 +6,8 @@ const mysql = require('mysql2/promise');
 const cors = require('cors');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
+const multer = require('multer'); // NEW: Multer for file uploads
+const fs = require('fs'); // NEW: Node.js File System module for deleting files
 
 const app = express();
 const port = 3000;
@@ -14,6 +16,39 @@ const JWT_SECRET = process.env.JWT_SECRET;
 
 app.use(cors());
 app.use(express.json());
+
+// --- Multer Storage Configuration (THIS COMES FIRST) ---
+const storage = multer.diskStorage({
+    destination: function (req, file, cb) {
+        const uploadDir = 'uploads/';
+        // Ensure the uploads directory exists
+        if (!fs.existsSync(uploadDir)) {
+            fs.mkdirSync(uploadDir);
+        }
+        cb(null, uploadDir); // Store files in the 'uploads/' directory
+    },
+    filename: function (req, file, cb) {
+        // Create a unique filename: fieldname-timestamp.ext
+        const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
+        const fileExtension = file.originalname.split('.').pop();
+        // It's good practice to sanitize filename for security, but for portfolio, this is basic.
+        cb(null, file.fieldname + '-' + uniqueSuffix + '.' + fileExtension);
+    }
+});
+
+const upload = multer({
+    storage: storage,
+    limits: { fileSize: 5 * 1024 * 1024 }, // Limit file size to 5MB
+    fileFilter: (req, file, cb) => {
+        // Allow only PDF files
+        if (file.mimetype === 'application/pdf') {
+            cb(null, true);
+        } else {
+            cb(new Error('Only PDF files are allowed!'), false);
+        }
+    }
+});
+
 
 const pool = mysql.createPool({
     host: process.env.DB_HOST || 'localhost',
@@ -25,7 +60,7 @@ const pool = mysql.createPool({
     queueLimit: 0
 });
 
-// --- Authentication & Authorization Middleware (remains the same) ---
+// --- Authentication & Authorization Middleware ---
 const authenticateToken = (req, res, next) => {
     const authHeader = req.headers['authorization'];
     const token = authHeader && authHeader.split(' ')[1];
@@ -38,7 +73,7 @@ const authenticateToken = (req, res, next) => {
         if (err) {
             return res.status(403).json({ message: 'Invalid or expired token.' });
         }
-        req.user = user; // IMPORTANT: req.user now contains { id, username, role }
+        req.user = user;
         next();
     });
 };
@@ -52,7 +87,7 @@ const authorizeRoles = (roles) => {
     };
 };
 
-// --- User Authentication Routes (remains the same) ---
+// --- User Authentication Routes ---
 app.post('/api/register', async (req, res) => {
     const { username, password, role } = req.body;
 
@@ -64,55 +99,38 @@ app.post('/api/register', async (req, res) => {
     }
 
     try {
-        console.log('Register attempt for username:', username); // Debug log 1
-
-        // Check if user already exists
-        console.log('Querying existing users...'); // Debug log 2
         const [existingUsers] = await pool.query('SELECT id FROM users WHERE username = ?', [username]);
-        console.log('Existing users query complete.'); // Debug log 3
-
         if (existingUsers.length > 0) {
             return res.status(409).json({ message: 'Username already exists.' });
         }
 
-        // Hash password
-        console.log('Hashing password...'); // Debug log 4
         const salt = await bcrypt.genSalt(10);
         const hashedPassword = await bcrypt.hash(password, salt);
-        console.log('Password hashed.'); // Debug log 5
 
-        // Insert new user into database
         const userRole = role || 'staff';
-        console.log('Inserting new user:', username, 'with role:', userRole); // Debug log 6
         const [result] = await pool.query(
             'INSERT INTO users (username, password, role) VALUES (?, ?, ?)',
             [username, hashedPassword, userRole]
         );
-        console.log('New user inserted. Insert ID:', result.insertId); // Debug log 7
 
-        // Generate JWT token for immediate login
-        console.log('Generating JWT token...'); // Debug log 8
         const token = jwt.sign(
             { id: result.insertId, username, role: userRole },
             JWT_SECRET,
             { expiresIn: '1h' }
         );
-        console.log('JWT token generated.'); // Debug log 9
 
         res.status(201).json({
             message: 'User registered successfully!',
             token,
             user: { id: result.insertId, username, role: userRole }
         });
-        console.log('Registration response sent.'); // Debug log 10
 
     } catch (err) {
-        console.error('Error during registration (caught):', err); // Debug log (if error is caught)
+        console.error('Error during registration:', err);
         res.status(500).json({ message: 'Server error during registration.', error: err.message });
     }
 });
 
-// POST /api/login - User Login
 app.post('/api/login', async (req, res) => {
     const { username, password } = req.body;
 
@@ -121,51 +139,38 @@ app.post('/api/login', async (req, res) => {
     }
 
     try {
-        console.log('Login attempt for username:', username); // Debug log 11
-
-        // Find user by username
-        console.log('Querying user for login...'); // Debug log 12
         const [users] = await pool.query('SELECT * FROM users WHERE username = ?', [username]);
-        console.log('User query complete.'); // Debug log 13
         const user = users[0];
 
         if (!user) {
             return res.status(400).json({ message: 'Invalid credentials.' });
         }
 
-        // Compare provided password with hashed password in DB
-        console.log('Comparing passwords...'); // Debug log 14
         const isMatch = await bcrypt.compare(password, user.password);
-        console.log('Password comparison complete.'); // Debug log 15
 
         if (!isMatch) {
             return res.status(400).json({ message: 'Invalid credentials.' });
         }
 
-        // Generate JWT token
-        console.log('Generating JWT token for login...'); // Debug log 16
         const token = jwt.sign(
             { id: user.id, username: user.username, role: user.role },
             JWT_SECRET,
             { expiresIn: '1h' }
         );
-        console.log('JWT token generated for login.'); // Debug log 17
 
         res.status(200).json({
             message: 'Logged in successfully!',
             token,
             user: { id: user.id, username: user.username, role: user.role }
         });
-        console.log('Login response sent.'); // Debug log 18
 
     } catch (err) {
-        console.error('Error during login (caught):', err); // Debug log (if error is caught)
+        console.error('Error during login:', err);
         res.status(500).json({ message: 'Server error during login.', error: err.message });
     }
 });
 
-// --- MODIFIED: GET /api/users - Get All Users (Admin Only) with Task Count ---
-// --- NEW: GET /api/users - Get All Users (Admin Only) with Task Count ---
+// --- NEW: GET /api/users - Get All Users (Admin Only) ---
 app.get('/api/users', authenticateToken, authorizeRoles(['admin']), async (req, res) => {
     try {
         const [users] = await pool.query(`
@@ -191,51 +196,52 @@ app.get('/api/users', authenticateToken, authorizeRoles(['admin']), async (req, 
     }
 });
 
-// --- NEW: DELETE /api/users/:id - Delete a User (Admin Only) ---
-app.delete('/api/users/:id', authenticateToken, authorizeRoles(['admin']), async (req, res) => {
-    const { id } = req.params; // ID of the user to be deleted
 
-    // IMPORTANT: Prevent admin from deleting themselves if this is the only admin account.
-    // You might want to add more robust checks here (e.g., must be at least one admin left).
-    if (parseInt(id) === req.user.id) { // Check if admin is trying to delete their own account
-        // You might want to make this check more robust, e.g., only if they are the last admin
-        return res.status(403).json({ message: 'Forbidden: You cannot delete your own account here.' });
-    }
+// --- MODIFIED: Task API Endpoints ---
+
+// --- NEW: GET /api/tasks/:id/download-pdf - Endpoint to serve the PDF file ---
+app.get('/api/tasks/:id/download-pdf', authenticateToken, async (req, res) => {
+    const { id: taskId } = req.params; // ID of the task
+    const userId = req.user.id;
+    const userRole = req.user.role;
 
     try {
-        const [result] = await pool.query('DELETE FROM users WHERE id = ?', [id]);
+        const [tasks] = await pool.query('SELECT user_id, document_path FROM tasks WHERE id = ?', [taskId]);
+        const task = tasks[0];
 
-        if (result.affectedRows === 0) {
-            return res.status(404).json({ message: 'User not found.' });
+        // 1. Check if task exists and has a document
+        if (!task || !task.document_path) {
+            return res.status(404).json({ message: 'Document not found for this task.' });
         }
-        console.log(`User ID ${id} deleted successfully by Admin ${req.user.username}`);
-        res.status(204).send(); // No Content for successful deletion
+
+        // 2. Authorization check: Only owner or admin can download
+        if (task.user_id !== userId && userRole !== 'admin') {
+            return res.status(403).json({ message: 'Access denied: You do not have permission to download this document.' });
+        }
+
+        // 3. Construct file path and check if file exists on disk
+        const filePath = `uploads/${task.document_path}`;
+        if (!fs.existsSync(filePath)) { // Use fs.existsSync to check file presence
+            console.error(`File not found on server for task ${taskId}: ${filePath}`);
+            return res.status(404).json({ message: 'File not found on server.' });
+        }
+
+        // 4. Serve the file for download
+        res.download(filePath, task.document_path); // 'res.download' sends file and sets headers
+        console.log(`Document for task ${taskId} downloaded by user ${req.user.username}: ${task.document_path}`);
+
     } catch (err) {
-        console.error('Error deleting user:', err);
-        res.status(500).json({ message: 'Error deleting user', error: err.message });
+        console.error('Error downloading PDF for task:', taskId, err);
+        res.status(500).json({ message: 'Server error during PDF download.', error: err.message });
     }
 });
 
-// --- MODIFIED: Task API Endpoints (NOW WITH OWNERSHIP) ---
-// ... (app.get('/api/tasks'), app.post('/api/tasks'), app.put('/api/tasks/:id'), app.delete('/api/tasks/:id')) ...
-
-// --- Start the server ---
-app.listen(port, () => {
-    console.log(`Backend server listening at http://localhost:${port}`);
-});
-
-// --- MODIFIED: Task API Endpoints (NOW WITH OWNERSHIP) ---
-
-// GET tasks for the logged-in user
-// GET tasks - Admin sees all, Staff sees their own
 // GET tasks - Admin sees all (or specific user's), Staff sees their own
-// GET tasks - Admin sees all (with owner/adder names), Staff sees their own (with adder name)
 app.get('/api/tasks', authenticateToken, async (req, res) => {
     try {
         let query;
         let queryParams = [];
 
-        // Base query with two joins: one for owner, one for adder
         query = `
             SELECT
                 t.*,
@@ -246,26 +252,20 @@ app.get('/api/tasks', authenticateToken, async (req, res) => {
                 tasks t
             JOIN
                 users u ON t.user_id = u.id
-            LEFT JOIN  -- Use LEFT JOIN because added_by_user_id can be NULL
+            LEFT JOIN
                 users adder ON t.added_by_user_id = adder.id
-        `; // <--- MODIFIED SQL (added LEFT JOIN)
+        `;
 
-        // Check if the authenticated user is an admin
         if (req.user.role === 'admin') {
             const { userId } = req.query;
 
             if (userId) {
                 query += ' WHERE t.user_id = ?';
                 queryParams.push(userId);
-                console.log(`Admin (${req.user.username}) fetching tasks for user ID: ${userId} with owner/adder names.`);
-            } else {
-                console.log(`Admin (${req.user.username}) fetching all tasks with owner/adder names.`);
             }
         } else {
-            // Staff/regular users: only see their own tasks
             query += ' WHERE t.user_id = ?';
             queryParams.push(req.user.id);
-            console.log(`Staff user (${req.user.username}) fetching their own tasks with adder name.`);
         }
 
         query += ' ORDER BY t.created_at DESC';
@@ -278,14 +278,12 @@ app.get('/api/tasks', authenticateToken, async (req, res) => {
     }
 });
 
-// POST a new task for the logged-in user
-// POST a new task (staff/admin can create for themselves, admin can assign to others)
 // POST a new task (staff/admin can create for themselves, admin can assign to others)
 app.post('/api/tasks', authenticateToken, authorizeRoles(['admin', 'staff']), async (req, res) => {
     const { title, description, user_id: assignedUserId } = req.body;
     const loggedInUserId = req.user.id;
     const loggedInUserRole = req.user.role;
-    const loggedInUsername = req.user.username; // <--- NEW: Get logged-in username
+    const loggedInUsername = req.user.username;
 
     if (!title) {
         return res.status(400).json({ message: 'Title is required' });
@@ -296,9 +294,6 @@ app.post('/api/tasks', authenticateToken, authorizeRoles(['admin', 'staff']), as
 
     if (loggedInUserRole === 'admin' && assignedUserId && assignedUserId !== loggedInUserId) {
         taskOwnerId = assignedUserId;
-        console.log(`Admin (${loggedInUsername}) adding task for user ID: ${taskOwnerId}, added by admin.`);
-    } else {
-        console.log(`User (${loggedInUsername}) adding task for themselves.`);
     }
 
     try {
@@ -314,7 +309,7 @@ app.post('/api/tasks', authenticateToken, authorizeRoles(['admin', 'staff']), as
             created_at: new Date().toISOString(),
             user_id: taskOwnerId,
             added_by_user_id: taskAddedById,
-            added_by_username: loggedInUsername // <--- MODIFIED: Include logged-in username in response
+            added_by_username: loggedInUsername
         });
     } catch (err) {
         console.error('Error adding task:', err);
@@ -326,7 +321,8 @@ app.post('/api/tasks', authenticateToken, authorizeRoles(['admin', 'staff']), as
 app.put('/api/tasks/:id', authenticateToken, authorizeRoles(['admin', 'staff']), async (req, res) => {
     const { id } = req.params;
     const { title, description, completed } = req.body;
-    const userId = req.user.id; // <--- NEW: Get user ID from authenticated token
+    const userId = req.user.id; // The ID of the currently logged-in user
+    const userRole = req.user.role; // <--- NEW: Get the role of the logged-in user
 
     let updateFields = [];
     let queryParams = [];
@@ -348,22 +344,38 @@ app.put('/api/tasks/:id', authenticateToken, authorizeRoles(['admin', 'staff']),
         return res.status(400).json({ message: 'No valid fields to update.' });
     }
 
-    // Add user_id to the WHERE clause to ensure ownership
+    let query; // <--- NEW
+    let whereClause; // <--- NEW
+
+    // --- MODIFIED LOGIC HERE ---
+    if (userRole === 'admin') {
+        // Admin can update any task by its ID
+        whereClause = 'WHERE id = ?';
+        queryParams.push(id); // Add task ID to params
+        console.log('Admin user updating any task.');
+    } else {
+        // Staff users can only update tasks they own
+        whereClause = 'WHERE id = ? AND user_id = ?';
+        queryParams.push(id, userId); // Add task ID and user ID to params
+        console.log('Staff user updating their own task.');
+    }
+
+    query = `UPDATE tasks SET ${updateFields.join(', ')} ${whereClause}`; // <--- Construct full query
+
     try {
-        const [result] = await pool.query(
-            `UPDATE tasks SET ${updateFields.join(', ')} WHERE id = ? AND user_id = ?`, // <--- MODIFIED
-            [...queryParams, id, userId] // <--- MODIFIED
-        );
+        const [result] = await pool.query(query, queryParams); // <--- Use dynamic query and params
 
         if (result.affectedRows === 0) {
-            // If affectedRows is 0, it means task was not found OR not owned by the user
+            // Determine if 404 (not found at all) or 403 (not owned / unauthorized)
             const [taskCheck] = await pool.query('SELECT id FROM tasks WHERE id = ?', [id]);
             if (taskCheck.length === 0) {
                 return res.status(404).json({ message: 'Task not found.' });
             } else {
-                return res.status(403).json({ message: 'Access denied: You do not own this task.' }); // <--- More specific error
+                // This 'else' path implies it was found but not owned (only applies to staff or if admin tried to update non-existent task by owner)
+                return res.status(403).json({ message: 'Access denied: You do not own this task, or Admin tried to update a non-existent ID.' });
             }
         }
+        // Fetch the updated task to return the most current state from DB
         const [updatedTaskRows] = await pool.query('SELECT * FROM tasks WHERE id = ?', [id]);
         res.json(updatedTaskRows[0]);
     } catch (err) {
@@ -372,54 +384,40 @@ app.put('/api/tasks/:id', authenticateToken, authorizeRoles(['admin', 'staff']),
     }
 });
 
-// --- MODIFIED: DELETE a task (Allow staff to delete their own, admin their own) ---
-// server.js
-// ... (Your imports and other setup code) ...
-
-// --- MODIFIED: DELETE a task (Allow staff to delete their own, admin their own, with detailed logs) ---
+// DELETE a task (Allow staff to delete their own, admin their own)
 app.delete('/api/tasks/:id', authenticateToken, authorizeRoles(['admin', 'staff']), async (req, res) => {
     const { id } = req.params;
-    const userId = req.user.id; // The ID of the currently logged-in user
-    const userRole = req.user.role; // <--- NEW: Get the role of the logged-in user
+    const userId = req.user.id;
+    const userRole = req.user.role;
 
-    console.log(`DELETE attempt for Task ID: ${id} by User ID: ${userId} (Role: ${userRole})`);
+    // console.log(`DELETE attempt for Task ID: ${id} by User ID: ${userId} (Role: ${userRole})`);
 
     let query;
     let queryParams;
 
-    // --- MODIFIED LOGIC HERE ---
     if (userRole === 'admin') {
-        // Admin can delete any task by its ID
         query = 'DELETE FROM tasks WHERE id = ?';
         queryParams = [id];
-        console.log('Admin user deleting any task.');
     } else {
-        // Staff users can only delete tasks they own
         query = 'DELETE FROM tasks WHERE id = ? AND user_id = ?';
         queryParams = [id, userId];
-        console.log('Staff user deleting their own task.');
     }
-    // --- END MODIFIED LOGIC ---
 
     try {
-        const [result] = await pool.query(query, queryParams); // <--- MODIFIED to use dynamic query and params
+        const [result] = await pool.query(query, queryParams);
 
-        console.log('SQL Query Result for DELETE:', result);
-        console.log('Affected rows:', result.affectedRows);
+        // console.log('SQL Query Result for DELETE:', result);
+        // console.log('Affected rows:', result.affectedRows);
 
         if (result.affectedRows === 0) {
-            // Determine if 404 (not found at all) or 403 (not owned)
             const [taskCheck] = await pool.query('SELECT id FROM tasks WHERE id = ?', [id]);
             if (taskCheck.length === 0) {
-                console.log(`Task ID ${id} truly not found.`);
                 return res.status(404).json({ message: 'Task not found.' });
             } else {
-                // This 'else' path implies it was found but not owned (only applies to staff or if admin tried to delete non-existent task by owner)
-                console.log(`Task ID ${id} found, but not owned by user ${userId} or admin attempted to delete non-existent task by ID only.`);
                 return res.status(403).json({ message: 'Access denied: You do not own this task, or Admin tried to delete an non-existent ID.' });
             }
         }
-        console.log(`Task ID ${id} deleted successfully by user ${userId}.`);
+        // console.log(`Task ID ${id} deleted successfully by user ${userId}.`);
         res.status(204).send();
     } catch (err) {
         console.error('Error deleting task:', err);
@@ -431,4 +429,3 @@ app.delete('/api/tasks/:id', authenticateToken, authorizeRoles(['admin', 'staff'
 app.listen(port, () => {
     console.log(`Backend server listening at http://localhost:${port}`);
 });
-

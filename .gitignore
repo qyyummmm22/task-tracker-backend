@@ -1,3 +1,4 @@
 # .gitignore in task-tracker-backend
 node_modules/
 .env
+uploads/
