@@ -57,7 +57,8 @@ const pool = mysql.createPool({
     database: process.env.DB_DATABASE || 'task_tracker_db',
     waitForConnections: true,
     connectionLimit: 10,
-    queueLimit: 0
+    queueLimit: 0,
+    timezone: 'Z' // Ensure timestamps are in UTC
 });
 
 // --- Authentication & Authorization Middleware ---
@@ -304,7 +305,7 @@ app.get('/api/tasks', authenticateToken, async (req, res) => {
 
 // POST a new task (staff/admin can create for themselves, admin can assign to others)
 app.post('/api/tasks', authenticateToken, authorizeRoles(['admin', 'staff']), async (req, res) => {
-    const { title, description, user_id: assignedUserId } = req.body;
+    const { title, description, user_id: assignedUserId, due_date, priority } = req.body;
     const loggedInUserId = req.user.id;
     const loggedInUserRole = req.user.role;
     const loggedInUsername = req.user.username;
@@ -322,8 +323,8 @@ app.post('/api/tasks', authenticateToken, authorizeRoles(['admin', 'staff']), as
 
     try {
         const [result] = await pool.query(
-            'INSERT INTO tasks (title, description, user_id, added_by_user_id) VALUES (?, ?, ?, ?)',
-            [title, description, taskOwnerId, taskAddedById]
+            'INSERT INTO tasks (title, description, user_id, added_by_user_id, due_date, priority) VALUES (?, ?, ?, ?, ?, ?)', // <--- MODIFIED
+            [title, description, taskOwnerId, taskAddedById, due_date, priority]
         );
         res.status(201).json({
             id: result.insertId,
@@ -333,7 +334,9 @@ app.post('/api/tasks', authenticateToken, authorizeRoles(['admin', 'staff']), as
             created_at: new Date().toISOString(),
             user_id: taskOwnerId,
             added_by_user_id: taskAddedById,
-            added_by_username: loggedInUsername
+            added_by_username: loggedInUsername,
+            due_date: due_date, // <--- Add to response
+            priority: priority
         });
     } catch (err) {
         console.error('Error adding task:', err);
@@ -406,7 +409,7 @@ app.post('/api/tasks/:id/upload-pdf', authenticateToken, authorizeRoles(['admin'
 // PUT (update) a task for the logged-in user (ensure ownership)
 app.put('/api/tasks/:id', authenticateToken, authorizeRoles(['admin', 'staff']), async (req, res) => {
     const { id } = req.params;
-    const { title, description, completed } = req.body;
+    const { title, description, completed, due_date, priority } = req.body;
     const userId = req.user.id; // The ID of the currently logged-in user
     const userRole = req.user.role; // <--- NEW: Get the role of the logged-in user
 
@@ -428,6 +431,16 @@ app.put('/api/tasks/:id', authenticateToken, authorizeRoles(['admin', 'staff']),
 
     if (updateFields.length === 0) {
         return res.status(400).json({ message: 'No valid fields to update.' });
+    }
+
+    if (due_date !== undefined) {
+        updateFields.push('due_date = ?');
+        queryParams.push(due_date);
+    }
+    
+    if (priority !== undefined) {
+        updateFields.push('priority = ?');
+        queryParams.push(priority);
     }
 
     let query; // <--- NEW
