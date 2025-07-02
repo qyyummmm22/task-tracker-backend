@@ -221,6 +221,72 @@ app.delete('/api/users/:id', authenticateToken, authorizeRoles(['admin']), async
     }
 });
 
+// --- NEW: PUT /api/users/:id/role - Update User Role (Admin Only) ---
+app.put('/api/users/:id/role', authenticateToken, authorizeRoles(['admin']), async (req, res) => {
+    const { id } = req.params; // ID of the user whose role is being changed
+    const { newRole } = req.body; // The new role ('admin' or 'staff')
+
+    // Basic validation for newRole
+    if (!newRole || !['admin', 'staff'].includes(newRole.toLowerCase())) {
+        return res.status(400).json({ message: 'Invalid role provided. Must be "admin" or "staff".' });
+    }
+
+    // Prevent admin from changing their own role (or demoting themselves)
+    // A more robust check might ensure at least one admin remains.
+    if (parseInt(id) === req.user.id) {
+        return res.status(403).json({ message: 'Forbidden: You cannot change your own role through this interface.' });
+    }
+
+    try {
+        const [result] = await pool.query('UPDATE users SET role = ? WHERE id = ?', [newRole.toLowerCase(), id]);
+
+        if (result.affectedRows === 0) {
+            return res.status(404).json({ message: 'User not found or role is already the same.' });
+        }
+        console.log(`Admin ${req.user.username} changed role of user ID ${id} to ${newRole.toLowerCase()}`);
+        res.status(200).json({ message: `User role updated to ${newRole.toLowerCase()}.` });
+    } catch (err) {
+        console.error('Error updating user role:', err);
+        res.status(500).json({ message: 'Server error updating user role.', error: err.message });
+    }
+});
+
+// --- NEW: PUT /api/users/:id/reset-password - Reset User Password (Admin Only) ---
+// --- MODIFIED: PUT /api/users/:id/reset-password - Manual Reset Password (Admin Only) ---
+app.put('/api/users/:id/reset-password', authenticateToken, authorizeRoles(['admin']), async (req, res) => {
+    const { id } = req.params; // ID of the user whose password is being reset
+    const { newPassword } = req.body; // <--- NEW: Expect newPassword from request body
+
+    // Basic validation for newPassword
+    if (!newPassword || newPassword.length < 6) { // Example: Minimum 6 characters
+        return res.status(400).json({ message: 'New password is required and must be at least 6 characters.' });
+    }
+
+    // Prevent admin from resetting their own password through this interface
+    if (parseInt(id) === req.user.id) {
+        return res.status(403).json({ message: 'Forbidden: You cannot reset your own password here.' });
+    }
+
+    try {
+        // 1. Hash the provided new password
+        const salt = await bcrypt.genSalt(10);
+        const hashedNewPassword = await bcrypt.hash(newPassword, salt);
+
+        // 2. Update the user's password in the database
+        const [result] = await pool.query('UPDATE users SET password = ? WHERE id = ?', [hashedNewPassword, id]);
+
+        if (result.affectedRows === 0) {
+            return res.status(404).json({ message: 'User not found.' });
+        }
+        // console.log(`Admin ${req.user.username} reset password for user ID ${id}.`); // No longer logging plain password
+        console.log(`Admin ${req.user.username} reset password for user ID ${id}.`);
+        res.status(200).json({ message: 'Password reset successfully.' }); // <--- No longer returning new_password
+    } catch (err) {
+        console.error('Error resetting user password:', err);
+        res.status(500).json({ message: 'Server error resetting password.', error: err.message });
+    }
+});
+
 
 // --- MODIFIED: Task API Endpoints ---
 
@@ -262,12 +328,10 @@ app.get('/api/tasks/:id/download-pdf', authenticateToken, async (req, res) => {
 });
 
 // GET tasks - Admin sees all (or specific user's), Staff sees their own
+// GET tasks - Admin sees all (or specific user's), Staff sees their own, now with filters
 app.get('/api/tasks', authenticateToken, async (req, res) => {
     try {
-        let query;
-        let queryParams = [];
-
-        query = `
+        let query = `
             SELECT
                 t.*,
                 u.username AS owner_username,
@@ -280,25 +344,67 @@ app.get('/api/tasks', authenticateToken, async (req, res) => {
             LEFT JOIN
                 users adder ON t.added_by_user_id = adder.id
         `;
+        let queryParams = [];
+        let whereClauses = []; // <--- NEW: Array to hold dynamic WHERE clauses
 
+        // --- User-specific filtering (remains at the start of WHERE clauses) ---
         if (req.user.role === 'admin') {
             const { userId } = req.query;
-
             if (userId) {
-                query += ' WHERE t.user_id = ?';
+                whereClauses.push('t.user_id = ?');
                 queryParams.push(userId);
             }
         } else {
-            query += ' WHERE t.user_id = ?';
+            whereClauses.push('t.user_id = ?');
             queryParams.push(req.user.id);
         }
 
+        // --- NEW: Filter parameters from query string (req.query) ---
+        const { search, completed, priority, startDate, endDate } = req.query;
+
+        // Search by title or description
+        if (search) {
+            whereClauses.push('(t.title LIKE ? OR t.description LIKE ?)');
+            queryParams.push(`%${search}%`, `%${search}%`);
+        }
+
+        // Filter by completion status
+        if (completed !== undefined) { // Check if 'completed' param exists
+            // Convert string 'true'/'false' to boolean 1/0 for MySQL
+            const completedValue = (completed === 'true' || completed === '1') ? 1 : 0;
+            whereClauses.push('t.completed = ?');
+            queryParams.push(completedValue);
+        }
+
+        // Filter by priority
+        if (priority && ['low', 'medium', 'high'].includes(priority.toLowerCase())) {
+            whereClauses.push('t.priority = ?');
+            queryParams.push(priority.toLowerCase());
+        }
+
+        // Filter by due date range (e.g., tasks due within a period)
+        if (startDate) {
+            // Ensure startDate is a valid date string for MySQL
+            whereClauses.push('t.due_date >= ?');
+            queryParams.push(startDate); // Frontend should send YYYY-MM-DD or YYYY-MM-DD HH:MM:SS
+        }
+        if (endDate) {
+            whereClauses.push('t.due_date <= ?');
+            queryParams.push(endDate); // Frontend should send YYYY-MM-DD or YYYY-MM-DD HH:MM:SS
+        }
+
+        // --- Construct the final WHERE clause ---
+        if (whereClauses.length > 0) {
+            query += ' WHERE ' + whereClauses.join(' AND ');
+        }
+
+        // --- Add ORDER BY clause ---
         query += ' ORDER BY t.created_at DESC';
 
         const [rows] = await pool.query(query, queryParams);
         res.json(rows);
     } catch (err) {
-        console.error('Error fetching tasks for user:', req.user?.id, 'Error:', err);
+        console.error('Error fetching tasks with filters:', req.user?.id, 'Error:', err); // Updated log
         res.status(500).json({ message: 'Error fetching tasks', error: err.message });
     }
 });
