@@ -53,7 +53,20 @@ const pool = mysql.createPool({
     waitForConnections: true,
     connectionLimit: 10,
     queueLimit: 0,
-    timezone: 'Z' // Ensure timestamps are in UTC
+    timezone: 'Z', // Keep this, it tells mysql2 how to interpret dates
+    dateStrings: true // Keep this, ensures dates are strings
+    // REMOVE THIS LINE: init_command: "SET time_zone = '+00:00'"
+});
+
+// --- NEW: Add event listener to set timezone for each new connection ---
+pool.on('connection', function (connection) {
+    connection.execute("SET time_zone = '+00:00'", function (err) {
+        if (err) {
+            console.error('Error setting time_zone for new connection:', err);
+        } else {
+            console.log('Successfully set time_zone to +00:00 for a new connection.'); // Debug log
+        }
+    });
 });
 
 // --- Authentication & Authorization Middleware ---
