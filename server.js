@@ -814,6 +814,42 @@ app.post('/api/tasks/:id/comments', authenticateToken, authorizeRoles(['admin', 
     }
 });
 
+// --- NEW: DELETE /api/comments/:id - Delete a Comment ---
+app.delete('/api/comments/:id', authenticateToken, authorizeRoles(['admin', 'staff']), async (req, res) => {
+    const { id: commentId } = req.params; // ID of the comment to be deleted
+    const userId = req.user.id; // ID of the user performing the deletion
+    const userRole = req.user.role; // Role of the user performing the deletion
+
+    try {
+        // 1. Fetch the comment to check ownership
+        const [comments] = await pool.query('SELECT user_id FROM comments WHERE id = ?', [commentId]);
+        const comment = comments[0];
+
+        if (!comment) {
+            return res.status(404).json({ message: 'Comment not found.' });
+        }
+
+        // 2. Authorization Check: Owner or Admin can delete
+        if (comment.user_id !== userId && userRole !== 'admin') {
+            return res.status(403).json({ message: 'Access denied: You do not own this comment and are not an admin.' });
+        }
+
+        // 3. Delete the comment
+        const [result] = await pool.query('DELETE FROM comments WHERE id = ?', [commentId]);
+
+        if (result.affectedRows === 0) {
+            // Should not happen if comment was found and authorized
+            return res.status(500).json({ message: 'Failed to delete comment (no rows affected).' });
+        }
+        console.log(`Comment ID ${commentId} deleted by User ID ${userId} (Role: ${userRole}).`);
+        res.status(204).send(); // 204 No Content for successful deletion
+
+    } catch (err) {
+        console.error('Error deleting comment:', commentId, err);
+        res.status(500).json({ message: 'Server error deleting comment.', error: err.message });
+    }
+});
+
 // --- Start the server ---
 app.listen(port, () => {
     console.log(`Backend server listening at http://localhost:${port}`);
