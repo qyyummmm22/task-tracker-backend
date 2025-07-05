@@ -730,6 +730,88 @@ app.delete('/api/tasks/:id', authenticateToken, authorizeRoles(['admin', 'staff'
         console.error('Error deleting task:', err);
         res.status(500).json({ message: 'Error deleting task', error: err.message });
     }
+}
+);
+
+// GET /api/tasks/:id/comments - Get comments for a specific task
+app.get('/api/tasks/:id/comments', authenticateToken, async (req, res) => {
+    const { id: taskId } = req.params;
+    // No authorization check here if any logged-in user can see comments on tasks they can view.
+    // If only task owner/admin can see comments, add task.user_id check here.
+    // For simplicity, let's assume if you can see the task, you can see its comments.
+
+    try {
+        const [comments] = await pool.query(`
+            SELECT
+                c.id,
+                c.task_id,
+                c.user_id,
+                c.content,
+                c.created_at,
+                u.username AS commenter_username,
+                u.role AS commenter_role
+            FROM
+                comments c
+            JOIN
+                users u ON c.user_id = u.id
+            WHERE
+                c.task_id = ?
+            ORDER BY
+                c.created_at ASC
+        `, [taskId]);
+        res.json(comments);
+    } catch (err) {
+        console.error('Error fetching comments for task:', taskId, err);
+        res.status(500).json({ message: 'Server error fetching comments.', error: err.message });
+    }
+});
+
+// POST /api/tasks/:id/comments - Add a new comment to a task
+app.post('/api/tasks/:id/comments', authenticateToken, authorizeRoles(['admin', 'staff']), async (req, res) => {
+    const { id: taskId } = req.params;
+    const { content } = req.body;
+    const userId = req.user.id; // The ID of the currently logged-in user
+
+    if (!content || content.trim() === '') {
+        return res.status(400).json({ message: 'Comment content cannot be empty.' });
+    }
+
+    try {
+        // Optional: Verify task exists before adding comment
+        const [tasks] = await pool.query('SELECT id FROM tasks WHERE id = ?', [taskId]);
+        if (tasks.length === 0) {
+            return res.status(404).json({ message: 'Task not found.' });
+        }
+
+        const [result] = await pool.query(
+            'INSERT INTO comments (task_id, user_id, content) VALUES (?, ?, ?)',
+            [taskId, userId, content.trim()]
+        );
+
+        // Fetch the newly created comment with username for immediate frontend display
+        const [newCommentRows] = await pool.query(`
+            SELECT
+                c.id,
+                c.task_id,
+                c.user_id,
+                c.content,
+                c.created_at,
+                u.username AS commenter_username,
+                u.role AS commenter_role
+            FROM
+                comments c
+            JOIN
+                users u ON c.user_id = u.id
+            WHERE
+                c.id = ?
+        `, [result.insertId]);
+
+        res.status(201).json(newCommentRows[0]); // Send back the full new comment object
+
+    } catch (err) {
+        console.error('Error adding comment to task:', taskId, err);
+        res.status(500).json({ message: 'Server error adding comment.', error: err.message });
+    }
 });
 
 // --- Start the server ---
